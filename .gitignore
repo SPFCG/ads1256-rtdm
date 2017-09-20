@@ -1,0 +1,17 @@
+# Ignore project files
+.project
+.cproject
+.settings/*
+.idea/*
+cmake-build-debug/
+
+# Ignore build generated files
+build/*
+!build/Makefile
+ksrc/*.o
+ksrc/*.o.cmd
+CMakeLists.txt
+Module.symvers
+
+# Ignore release files
+release/*
