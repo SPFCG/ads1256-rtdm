@@ -36,6 +36,19 @@
 /* BCM2835 library header */
 #include "bcm2835.h"
 
+#define  DRDY  RPI_GPIO_P1_11         //P0
+#define  RST  RPI_GPIO_P1_12     //P1
+#define	SPICS	RPI_GPIO_P1_15	//P3
+
+#define CS_1() bcm2835_gpio_write(SPICS,HIGH)
+#define CS_0()  bcm2835_gpio_write(SPICS,LOW)
+
+#define SPI_BCM283X_RTDM_DEVICES_NUMBER 2
+
+#define DRDY_IS_LOW()	((bcm2835_gpio_lev(DRDY)==0))
+
+#define RST_1() 	bcm2835_gpio_write(RST,HIGH);
+#define RST_0() 	bcm2835_gpio_write(RST,LOW);
 
 /**
  * Maximum size for transmit and receive buffers.
@@ -45,29 +58,30 @@
 /**
  * Buffer type.
  */
- typedef struct buffer_s {
-	int size;
-	char data[BCM283X_SPI_BUFFER_SIZE_MAX];
+typedef struct buffer_s {
+    int size;
+    uint8_t data[BCM283X_SPI_BUFFER_SIZE_MAX];
 } buffer_t;
 
 /**
  * Device config structure stored inside each context.
  */
 typedef struct config_s {
-	int bit_order;
-	int data_mode;
-	int clock_divider;
-	int chip_select;
-	int chip_select_polarity;
+    int bit_order;
+    int data_mode;
+    int clock_divider;
+    int chip_select;
+    int chip_select_polarity;
 } config_t;
 
 /**
  * Device context, associated with every open device instance.
  */
 typedef struct spi_bcm283x_context_s {
-	config_t config;
-	buffer_t transmit_buffer;
-	buffer_t receive_buffer;
+    config_t config;
+    buffer_t transmit_buffer;
+    buffer_t receive_buffer;
+    uint8_t  device_used;
 } spi_bcm283x_context_t;
 
 
@@ -96,38 +110,38 @@ typedef struct spi_bcm283x_context_s {
  * List of available speeds for the SPI bus.
  */
 typedef enum bcm283x_spi_speed {
-	BCM283X_SPI_SPEED_4kHz = 0,
-	BCM283X_SPI_SPEED_7kHz = 32768,
-	BCM283X_SPI_SPEED_15kHz = 16384,
-	BCM283X_SPI_SPEED_30kHz = 8192,
-	BCM283X_SPI_SPEED_61kHz = 4096,
-	BCM283X_SPI_SPEED_122kHz = 2048,
-	BCM283X_SPI_SPEED_244kHz = 1024,
-	BCM283X_SPI_SPEED_488kHz = 512,
-	BCM283X_SPI_SPEED_976kHz = 256,
-	BCM283X_SPI_SPEED_2MHz = 128,
-	BCM283X_SPI_SPEED_4MHz = 64,
-	BCM283X_SPI_SPEED_8MHz = 32,
-	BCM283X_SPI_SPEED_15MHz = 16,
-	BCM283X_SPI_SPEED_31MHz = 8,
-	BCM283X_SPI_SPEED_62MHz = 4,
-	BCM283X_SPI_SPEED_125MHz = 2
+    BCM283X_SPI_SPEED_4kHz = 0,
+    BCM283X_SPI_SPEED_7kHz = 32768,
+    BCM283X_SPI_SPEED_15kHz = 16384,
+    BCM283X_SPI_SPEED_30kHz = 8192,
+    BCM283X_SPI_SPEED_61kHz = 4096,
+    BCM283X_SPI_SPEED_122kHz = 2048,
+    BCM283X_SPI_SPEED_244kHz = 1024,
+    BCM283X_SPI_SPEED_488kHz = 512,
+    BCM283X_SPI_SPEED_976kHz = 256,
+    BCM283X_SPI_SPEED_2MHz = 128,
+    BCM283X_SPI_SPEED_4MHz = 64,
+    BCM283X_SPI_SPEED_8MHz = 32,
+    BCM283X_SPI_SPEED_15MHz = 16,
+    BCM283X_SPI_SPEED_31MHz = 8,
+    BCM283X_SPI_SPEED_62MHz = 4,
+    BCM283X_SPI_SPEED_125MHz = 2
 } bcm2835_spi_speed_e;
 
 /**
  * SPI chip select polarity.
  */
 typedef enum {
-	BCM283X_SPI_CS_POL_LOW = 0,
-	BCM283X_SPI_CS_POL_HIGH = 1
+    BCM283X_SPI_CS_POL_LOW = 0,
+    BCM283X_SPI_CS_POL_HIGH = 1
 } bcm283x_spi_cs_polarity_e;
 
 /**
  * SPI data bit ordering.
  */
 typedef enum {
-	BCM283X_SPI_BIT_ORDER_LSBFIRST = 0,
-	BCM283X_SPI_BIT_ORDER_MSBFIRST = 1
+    BCM283X_SPI_BIT_ORDER_LSBFIRST = 0,
+    BCM283X_SPI_BIT_ORDER_MSBFIRST = 1
 } bcm283x_spi_bit_order_e;
 
 /**
@@ -138,10 +152,10 @@ typedef enum {
  *  - Mode 3 : CPOL = 1, CPHA = 1
  */
 typedef enum {
-	BCM283X_SPI_DATA_MODE_0 = 0,
-	BCM283X_SPI_DATA_MODE_1 = 1,
-	BCM283X_SPI_DATA_MODE_2 = 2,
-	BCM283X_SPI_DATA_MODE_3 = 3
+    BCM283X_SPI_DATA_MODE_0 = 0,
+    BCM283X_SPI_DATA_MODE_1 = 1,
+    BCM283X_SPI_DATA_MODE_2 = 2,
+    BCM283X_SPI_DATA_MODE_3 = 3
 } bcm283x_spi_mode_e;
 
 #endif /* BCM283X_SPI_RTDM_H */

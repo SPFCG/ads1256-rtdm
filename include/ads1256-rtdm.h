@@ -22,7 +22,22 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/delay.h>
+#include <linux/vmalloc.h>
+#include <linux/types.h>
 #include "spi-bcm283x-rtdm.h"
+
+#ifdef __CDT_PARSER__
+#include <stdint.h>
+#define ssize_t size_t
+#endif /* __CDT_PARSER__ */
+
+#define ADS1256_ADC_DEVICES_NUMBER 8
+#define ADS126_DEVICE_ID 0x03
+const char * spi_rtdm_device[] = {
+        "/dev/rtdm/spidev0.0",
+        "/dev/rtdm/spidev0.1"
+};
 
 typedef enum ads1256_commands {
     ADS1256_COMMAND_WAKEUP  = 0x00, // Completes SYNC and Exits Standby Mode
@@ -90,11 +105,15 @@ typedef enum ads1256_data_rate{
 }ads1256_data_rate_e;
 
 struct ads1256_register_status_s{
-    uint8_t id:4;
     uint8_t order:1;
     uint8_t acal:1;
     uint8_t bufen:1;
     uint8_t drdy:1;
+    uint8_t id:4;
+
+
+
+
 };
 
 struct ads1256_register_mux_s{
@@ -105,16 +124,16 @@ struct ads1256_register_mux_s{
 };
 
 struct ads1256_register_adcon_s{
-    uint8_t psel:4;
     uint8_t nsel:4;
+    uint8_t psel:4;
 };
 
 struct ads1256_register_io_s{
+    uint8_t dio:4;
     uint8_t dir3:1;
     uint8_t dir2:1;
     uint8_t dir1:1;
     uint8_t dir0:1;
-    uint8_t dio:4;
 };
 
 typedef union ads1256_register_status_u{
@@ -143,7 +162,12 @@ typedef union ads1256_register_io_u{
 } ads1256_register_io_t;
 
 
+static struct ads1256_dev_context_s {
+    spi_bcm283x_context_t *spi_bcm283x_context;
+    ads1256_analog_inputs_e analog_input;
+};
 
+typedef struct ads1256_dev_context_s ads1256_dev_context_t;
 
 extern int bcm283x_spi_rtdm_set_default_config(spi_bcm283x_context_t *context, int chip_select);
 extern ssize_t bcm283x_spi_rtdm_read_rt_using_context(spi_bcm283x_context_t *context, buffer_t *buf, size_t size);
@@ -152,5 +176,10 @@ extern int bcm283x_spi_change_bit_order(spi_bcm283x_context_t *context, const in
 extern int bcm283x_spi_change_data_mode(spi_bcm283x_context_t *context, const int value);
 extern int bcm283x_spi_change_clock_divider(spi_bcm283x_context_t *context, const int value);
 extern int bcm283x_spi_change_cs_polarity(spi_bcm283x_context_t *context, const int value);
-
+extern uint8_t bcm283x_spi_rtdm_read_byte_rt(spi_bcm283x_context_t *context);
+extern uint8_t bcm283x_spi_rtdm_write_byte_rt(spi_bcm283x_context_t *context, uint8_t byte);
+extern void bcm2835_gpio_write(uint8_t pin, uint8_t on);
+extern uint8_t bcm2835_gpio_lev(uint8_t pin);
+extern  void bcm2835_delayMicroseconds(uint64_t micros);
+//extern spi_bcm283x_context_t * bcm283x_spi_rtdm_open_devices[SPI_BCM283X_RTDM_DEVICES_NUMBER];
 #endif //ADS1256_RTDM_ADS1256_RTDM_H
