@@ -18,7 +18,6 @@
 #include "../include/ads1256-rtdm.h"
 
 
-/* Bypass CLion syntax checker */
 #ifdef __CDT_PARSER__
 #define __init
 #define __exit
@@ -28,36 +27,134 @@
 #define MODULE_LICENSE(x)
 #define module_init(x)
 #define module_exit(x)
-#endif /* __CDT_PARSER__ */
+#define module_param(x)
+#define MODULE_PARM_DESC(x)
 
 
 
-static ads1256_dev_context_t *context;
+#endif
 
+bool high_edge = true;
+bool device_init = false;
 
+static short drdy_gpio_pin= ADS1256_DEFAULT_DRDY_GPIO_PIN;
+static short reset_gpio_pin = ADS1256_DEFAULT_RESET_GPIO_PIN;
 
-static struct rtdm_fd * file_desctiptor_device;
-static int device_handle;
 static rtdm_task_t  ads1256_task_agent;
+static rtdm_task_t  ads1256_search_ac_task;
 static struct rtdm_device ads1256_adc_devices[ADS1256_ADC_DEVICES_NUMBER];
+static ads1256_dev_context_t * ads1256_ads_open_devices[ADS1256_ADC_DEVICES_NUMBER];
+static rtdm_lock_t global_lock;
 
-static int ads1256_read_data(buffer_t * data){
-    bcm283x_spi_rtdm_read_rt_using_context(context, data, BCM283X_SPI_BUFFER_SIZE_MAX );
-    return 0;
+static struct rtdm_spi_remote_slave * active_cs;
+static struct rtdm_spi_master *rtdm_master;
+rtdm_irq_t irqh;
+static u8 active_channel = ADS1256_EMPTY_CHANNEL;
+static struct ring_buffer global_buffer;
+
+static buffer_t buffer_cmd;
+static u8 last_byte_no = 0;
+static atomic_t drdy_is_low_status = ATOMIC_INIT(0);
+
+
+module_param(drdy_gpio_pin, short, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+MODULE_PARM_DESC(drdy_gpio_pin, "DRDY GPIO pin");
+module_param(reset_gpio_pin, short, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+MODULE_PARM_DESC(reset_gpio_pin, "RESET GPIO pin");
+
+
+static void ads1256_wait_drdy(void)
+{
+    u32 i;
+
+    for (i = 0; i < 100; i++)
+    {
+        if (gpio_get_value(drdy_gpio_pin) == 0 && high_edge == true)
+        {
+            high_edge = false;
+            break;
+        }else{
+            high_edge = true;
+        }
+        udelay(3);
+    }
+    if (i >= 100)
+    {
+        printk(KERN_WARNING"ADS1256_WaitDRDY() Time Out ...");
+    }
+}
+
+static void ads1256_spi_do_chip_select(void)
+{
+    gpio_set_value(active_cs->cs_gpio, 0);
+}
+
+static void ads1256_spi_do_chip_deselect(void)
+{
+    gpio_set_value(active_cs->cs_gpio, 1);
+}
+
+
+static int ads1256_read_n_bytes(u8 *bytes, u32 n){
+    int ret;
+    //rtdm_mutex_lock(&rtdm_master->bus_lock);
+   // ads1256_spi_do_chip_select();
+    ret = rtdm_master->ops->read(active_cs, bytes, n);
+   // ads1256_spi_do_chip_deselect();
+
+   // rtdm_mutex_unlock(&rtdm_master->bus_lock);
+    return ret;
 }
 
 static uint8_t ads1256_read_byte(void){
-   return bcm283x_spi_rtdm_read_byte_rt(context);
+    u8 byte;
+    ssize_t size;
+    size = ads1256_read_n_bytes(&byte, 1);
+   // printk(KERN_ERR"Read %u bytes %u", size, byte);
+
+    return byte;
+}
+
+static ssize_t ads1256_write_n_bytes(u8 *bytes, u32 n){
+    int ret;
+    ssize_t  size;
+   // rtdm_mutex_lock(&rtdm_master->bus_lock);
+
+    size = rtdm_master->ops->write(active_cs, bytes, n);
+    //ads1256_spi_do_chip_deselect();
+
+   // rtdm_mutex_unlock(&rtdm_master->bus_lock);
+    return size;
 }
 
 static ssize_t ads1256_write_byte(uint8_t byte){
-    return bcm283x_spi_rtdm_write_byte_rt(context, byte);
+    return ads1256_write_n_bytes(&byte, 1);
 }
 
-static int ads1256_rtdm_send_cmd(ads1256_commands_e cmd, ads1256_registers_e register_address, uint8_t value){
+
+
+
+
+static int ads1256_rtdm_send_cmd(void){
     ssize_t write_size;
-    buffer_t buffer;
-    int i;
+
+
+    write_size = ads1256_write_n_bytes(&(buffer_cmd.data), buffer_cmd.size);
+    buffer_cmd.size = 0;
+    last_byte_no = 0;
+    if(write_size > 0)
+       return 0;
+    else {
+
+        printk(KERN_ERR "Problem communication with ads1256 using SPI.write_size: %u\r\n", write_size);
+        return EIO;
+    }
+
+}
+
+
+static int ads1256_rtdm_prepare_cmd(ads1256_commands_e cmd, ads1256_registers_e register_address, uint8_t value){
+;
     switch(cmd) {
         case ADS1256_COMMAND_RDATA:
         case ADS1256_COMMAND_RDATAC:
@@ -71,8 +168,8 @@ static int ads1256_rtdm_send_cmd(ads1256_commands_e cmd, ads1256_registers_e reg
         case ADS1256_COMMAND_SYSGCAL:
         case ADS1256_COMMAND_SYSOCAL:
         case ADS1256_COMMAND_WAKEUP:
-            buffer.data[0] = cmd;
-            buffer.size = 1;
+            buffer_cmd.data[last_byte_no++] = cmd;
+            buffer_cmd.size++;
             break;
 
         case ADS1256_COMMAND_RREG:
@@ -88,9 +185,9 @@ static int ads1256_rtdm_send_cmd(ads1256_commands_e cmd, ads1256_registers_e reg
                 case ADS1256_REGISTER_FSC0:
                 case ADS1256_REGISTER_FSC1:
                 case ADS1256_REGISTER_FSC2:
-                    buffer.data[0] = ((uint8_t) cmd + (uint8_t) register_address);
-                    buffer.data[1] = 0x00;
-                    buffer.size = 2;
+                    buffer_cmd.data[last_byte_no++] = ((uint8_t) cmd + (uint8_t) register_address);
+                    buffer_cmd.data[last_byte_no++] = 0x00;
+                    buffer_cmd.size += 2;
                     break;
                 default:
                     printk(KERN_ERR "Invalid register_address used in ads1256_rtdm_send_cmd  while using ADS1256_COMMAND_RREG or ADS1256_COMMAND_WREG command.\r\n");
@@ -110,10 +207,10 @@ static int ads1256_rtdm_send_cmd(ads1256_commands_e cmd, ads1256_registers_e reg
                 case ADS1256_REGISTER_FSC0:
                 case ADS1256_REGISTER_FSC1:
                 case ADS1256_REGISTER_FSC2:
-                    buffer.data[0] = (uint8_t) cmd + (uint8_t) register_address;
-                    buffer.data[1] = 0;
-                    buffer.data[2] = value;
-                    buffer.size = 3;
+                    buffer_cmd.data[last_byte_no++] = (uint8_t) cmd + (uint8_t) register_address;
+                    buffer_cmd.data[last_byte_no++] = 0;
+                    buffer_cmd.data[last_byte_no++] = value;
+                    buffer_cmd.size += 3;
                     break;
                 default:
                     printk(KERN_ERR "Invalid register_address used in ads1256_rtdm_send_cmd  while using ADS1256_COMMAND_RREG or ADS1256_COMMAND_WREG command.\r\n");
@@ -126,18 +223,8 @@ static int ads1256_rtdm_send_cmd(ads1256_commands_e cmd, ads1256_registers_e reg
             return EINVAL;
     }
 
-    //write_size = bcm283x_spi_rtdm_write_rt_using_context(context, &buffer,(size_t) buffer.size);
-    for(i = 0; i < buffer.size; i++)
-        ads1256_write_byte(buffer.data[i]);
 
-//    if(write_size > 0)
- //       return 0;
-  //  else {
-  //  else {
-   //     printk(KERN_ERR "Problem communication with ads1256 using SPI.write_size: %u\r\n", write_size);
-    //    return EIO;
-    //}
-    return 0;
+
 }
 
 static int ads1256_rtdm_read_register(ads1256_registers_e register_address, uint8_t *return_value) {
@@ -153,12 +240,14 @@ static int ads1256_rtdm_read_register(ads1256_registers_e register_address, uint
         case ADS1256_REGISTER_FSC0:
         case ADS1256_REGISTER_FSC1:
         case ADS1256_REGISTER_FSC2:
-            ads1256_rtdm_send_cmd(ADS1256_COMMAND_RREG, register_address, 0);
-                *return_value = ads1256_read_byte();
-                return 0;
-
-
-            break;
+            ads1256_spi_do_chip_select();
+            //ads1256_wait_drdy();
+            ads1256_rtdm_prepare_cmd(ADS1256_COMMAND_RREG, register_address, 0);
+            ads1256_rtdm_send_cmd();
+            udelay(10);
+            *return_value = ads1256_read_byte();
+            ads1256_spi_do_chip_deselect();
+            return 0;
         default:
             printk(KERN_ERR "Invalid register address used in ads1256_rtdm_read_register while using.\r\n");
             return EINVAL;
@@ -191,7 +280,7 @@ static int ads1256_rtdm_read_register_drate(ads1256_register_drate_t *value){
 
    return  ads1256_rtdm_read_register(ADS1256_REGISTER_DRATE, &(value->value));
 }
-
+/*
 static int ads1256_rtdm_read_registers_ofc(uint32_t  * value){
     buffer_t buffer;
     ssize_t  write_size;
@@ -200,7 +289,7 @@ static int ads1256_rtdm_read_registers_ofc(uint32_t  * value){
     buffer.data[1] = 0x2;
     buffer.size = 2;
 
-    write_size = bcm283x_spi_rtdm_write_rt_using_context(context, &buffer, buffer.size);
+    write_size = bcm283x_spi_rtdm_write_rt_using_context(spi_context, &buffer, buffer.size);
     if(write_size <= 0)
     {
         printk(KERN_ERR "Problem communication with ads1256 using SPI.\r\n");
@@ -217,9 +306,9 @@ static int ads1256_rtdm_read_registers_ofc(uint32_t  * value){
         printk(KERN_ERR "Problem communication with ads1256 using SPI.\r\n");
         return EIO;
     }
-}
+}*/
 
-static int ads1256_rtdm_read_registers_fsc(uint32_t  * value){
+/*static int ads1256_rtdm_read_registers_fsc(uint32_t  * value){
     buffer_t buffer;
     ssize_t  write_size;
     value = 0x0;
@@ -227,7 +316,7 @@ static int ads1256_rtdm_read_registers_fsc(uint32_t  * value){
     buffer.data[1] = 0x2;
     buffer.size = 2;
 
-    write_size = bcm283x_spi_rtdm_write_rt_using_context(context, &buffer, buffer.size);
+    write_size = bcm283x_spi_rtdm_write_rt_using_context(spi_context, &buffer, buffer.size);
     if(write_size <= 0)
     {
         printk(KERN_ERR "Problem communication with ads1256 using SPI.\r\n");
@@ -244,10 +333,11 @@ static int ads1256_rtdm_read_registers_fsc(uint32_t  * value){
         printk(KERN_ERR "Problem communication with ads1256 using SPI.\r\n");
         return EIO;
     }
-}
+}*/
 
 static void ads1256_rtdm_print_register_status(void){
     ads1256_register_status_t register_address;
+    register_address.value = 0;
     ads1256_rtdm_read_register_status(&register_address) ;
 
     printk(KERN_INFO "[ads1256-rtdm] ADS1256 device status:\n");
@@ -268,31 +358,51 @@ static void ads1256_rtdm_print_register_data_rate(void){
 }
 
 static int ads1256_rtdm_open(struct rtdm_fd *fd, int oflags) {
-    ads1256_dev_context_t * context = (ads1256_dev_context_t *) rtdm_fd_to_private(fd);
-    context->analog_input = fd->minor;
- return 0;
+    if(active_channel == ADS1256_EMPTY_CHANNEL) {
+        ads1256_dev_context_t *context = (ads1256_dev_context_t *) rtdm_fd_to_private(fd);
+        int device_id = fd->minor;
+        rtdm_lock_get(&global_lock);
+        context->analog_input = device_id;
+        context->device_used = 1;
+        active_channel = device_id;
+        ads1256_ads_open_devices[device_id] = context;
+        ring_buffer_init(&(context->buffer), ADS1256_BUFFER_SIZE);
+        rtdm_lock_put(&global_lock);
+        return 0;
+    }else{
+        return -EBUSY;
+    }
 }
 
 static void ads1256_rtdm_close(struct rtdm_fd *fd) {
+    rtdm_lock_get(&global_lock);
+    ads1256_dev_context_t * context = (ads1256_dev_context_t *) rtdm_fd_to_private(fd);
+    context->analog_input = fd->minor;
+    context->device_used = 0;
+    ads1256_ads_open_devices[fd->minor] = NULL;
+    active_channel = ADS1256_EMPTY_CHANNEL;
+    rtdm_lock_put(&global_lock);
+
     return;
 
 }
 
 static ssize_t ads1256_rtdm_read_rt(struct rtdm_fd *fd, void __user *buf, size_t size) {
 
+    /* TO DO uwzglednic size */
     ads1256_dev_context_t * context = (ads1256_dev_context_t *) rtdm_fd_to_private(fd);
 
-    ads1256_rtdm_send_cmd(ADS1256_COMMAND_WREG, ADS1256_REGISTER_MUX, (context->analog_input << 4) + AINCOM);
-    ads1256_rtdm_send_cmd(ADS1256_COMMAND_SYNC, ADS1256_REGISTER_NONE, 0);
-    ads1256_rtdm_send_cmd(ADS1256_COMMAND_WAKEUP, ADS1256_REGISTER_NONE, 0);
-    ads1256_rtdm_send_cmd(ADS1256_COMMAND_RDATA, ADS1256_REGISTER_NONE, 0);
-    buffer_t data;
+    u8 *buffer;
+    int curr_size;
+    rtdm_lock_get(&(context->lock));
+    curr_size = context->buffer.cur_size;
+    buffer = rtdm_malloc(curr_size);
+    ring_buffer_get_n(&(context->buffer), buffer, curr_size );
 
-    data.data[0] = ads1256_read_byte();
-    data.data[1] = ads1256_read_byte();
-    data.data[2] = ads1256_read_byte();
-    rtdm_safe_copy_to_user(fd, buf, (const void *) data.data, 3);
-    return 3;
+    rtdm_lock_put(&(context->lock));
+    rtdm_safe_copy_to_user(fd, buf, (const void *) buffer, curr_size);
+    rtdm_free(buffer);
+    return curr_size;
 
 }
 
@@ -331,6 +441,7 @@ int ads1256_rtdm_init_ac_devices(void){
         ads1256_adc_devices[device_id].driver = &ads1256_driver;
         ads1256_adc_devices[device_id].label = "acd0.%d";
         ads1256_adc_devices[device_id].minor = device_id;
+        ads1256_ads_open_devices[device_id] = NULL;
 
         /* Try to register the device */
         res = rtdm_dev_register(&ads1256_adc_devices[device_id]);
@@ -361,47 +472,158 @@ int ads1256_rtdm_init_ac_devices(void){
     return 0;
 }
 
-static int ads1256_rtdm_search_device_on_spi(void) {
-    int device_id, res ;
+static int ads1256_drdy_is_low(rtdm_irq_t *irqh)
+{
 
-    for(device_id = 0 ; device_id < SPI_BCM283X_RTDM_DEVICES_NUMBER; device_id++){
-
-        res = rtdm_open(spi_rtdm_device[device_id], O_RDWR);
-
-        if(res > 0){
-
-            printk(KERN_INFO "Search device on %s", spi_rtdm_device[device_id]);
-
-            struct rtdm_fd * fd = rtdm_fd_get(res, RTDM_FD_MAGIC);
-            context = (ads1256_dev_context_t *)rtdm_fd_to_private(fd);
-
-            ads1256_register_status_t register_address;
-            ads1256_rtdm_read_register_status(&register_address);
-
-            if(register_address.elements.id == ADS126_DEVICE_ID){
-
-                printk(KERN_INFO "Found ADS1256 device on %s", spi_rtdm_device[device_id]);
-                device_handle = res;
-                rtdm_fd_put(fd);
-                return 0;
-            }else{
-                rtdm_fd_put(fd);
-                context = NULL;
-                rtdm_close(res);
-                continue;
-            }
-        }else{
-            context = NULL;
-            continue;
-        }
-    }
-    printk(KERN_ERR "Device ADS1256 not connected.\r\n");
-    return -ENOENT;
+    atomic_set(&drdy_is_low_status, 1);
+    //rtdm_task_unblock(&ads1256_task_agent);
+    //xnthread_resume(&ads1256_task_agent, 0);
+    return RTDM_IRQ_HANDLED;
 }
-/*
-static int ads1256_rtdm_task_init(rtdm_task_t *task, const char *name,
-                   rtdm_task_proc_t task_proc, void *arg,
-                   int priority, nanosecs_rel_t period)
+
+static void ads1256_dma_ready(unsigned long data){
+    printk(KERN_ERR "To chyba działa");
+}
+
+
+
+static void ads1256_dma_exampel(void){
+
+    struct rtdm_spi_iobufs iobufs;
+    int ret;
+    static unsigned char *i_area, *o_area;
+#define TRANSFER_SIZE 30000 * 3  * 1;
+
+    struct rtdm_spi_config *config = &active_cs->config;
+    config->bits_per_word = 8;
+    config->mode = SPI_MODE_1;
+    config->speed_hz = 3920000;
+    rtdm_master->ops->configure(active_cs);
+
+
+    iobufs.io_len = TRANSFER_SIZE;
+    ret = rtdm_master->ops->set_iobufs(active_cs, &iobufs);
+    rtdm_master->ops->dma_done_handler(active_cs, ads1256_dma_ready);
+    rtdm_master->ops->transfer_iobufs(active_cs);
+    i_area = iobufs.io_virt + iobufs.i_offset;
+    o_area = iobufs.io_virt + iobufs.o_offset;
+
+
+}
+
+static void ads1256_rtdm_search_device_on_spi(void * arg) {
+    int device_id, res ,ret, speed_hz = 60000000, * return_value = (int)arg, j;
+    struct spi_ioc_transfer ;
+    struct rtdm_spi_config config;
+    struct rtdm_spi_iobufs iobufs;
+    struct _rtdm_mmap_request mmap_request;
+    static unsigned char *i_area, *o_area;
+    void *u_addr = NULL;
+    int  irq_trigger = 0;
+    unsigned int irq;
+    ;
+
+
+    struct spi_device *spi_device;
+#define MY_BUS_NUM 0
+    struct spi_master *master;
+    struct device *dev;
+    struct rtdm_spi_iobufs io_bufs;
+
+    //Register information about your slave device:
+    struct spi_board_info spi_device_info = {
+            .modalias = "rtdm_spi_device",
+            .max_speed_hz = 1, //speed your device (slave) can handle
+            .bus_num = MY_BUS_NUM,
+            .chip_select = 0,
+            .mode = SPI_MODE_0,
+    };
+
+
+
+    /*To send data we have to know what spi port/pins should be used. This information
+      can be found in the device-tree. */
+    master = spi_busnum_to_master( spi_device_info.bus_num );
+    rtdm_master = dev_get_drvdata(&master->dev);
+    if( rtdm_master == NULL){
+        printk("MASTER not found.\n");
+        return;// -ENODEV;
+    }else {
+        printk("MASTER found.\n");
+
+    }
+
+    struct list_head *i;
+
+    list_for_each(i, &rtdm_master->slaves){
+        active_cs = list_entry(i, struct rtdm_spi_remote_slave, next);
+        ads1256_spi_do_chip_select();
+
+        struct rtdm_spi_config *config = &active_cs->config;
+        config->bits_per_word = 8;
+        config->mode = SPI_MODE_1;
+        config->speed_hz = 3920000;
+        rtdm_master->ops->configure(active_cs);
+
+
+        printk(KERN_INFO "Search ADS1256 device on %s",active_cs->dev.name );
+
+
+        ads1256_register_status_t register_address;
+        register_address.value = 0;
+        ads1256_rtdm_read_register_status(&register_address);
+        printk(KERN_INFO "Elemet id: %u", register_address.elements.id);
+        if (register_address.elements.id == ADS1256_DEVICE_ID) {
+            u8 chanell = 0;
+            ads1256_spi_do_chip_select();
+            ads1256_rtdm_prepare_cmd(ADS1256_COMMAND_WREG, ADS1256_REGISTER_MUX, (chanell << 4) + AINCOM);
+            ads1256_rtdm_send_cmd();
+            udelay(10);
+
+            ads1256_rtdm_prepare_cmd(ADS1256_COMMAND_SYNC, ADS1256_REGISTER_NONE, 0);
+            ads1256_rtdm_prepare_cmd(ADS1256_COMMAND_WAKEUP, ADS1256_REGISTER_NONE, 0);
+            ads1256_rtdm_send_cmd();
+            udelay(10);
+
+            ads1256_rtdm_prepare_cmd(ADS1256_COMMAND_RDATAC, ADS1256_REGISTER_NONE, 0);
+            ads1256_rtdm_send_cmd();
+
+            irq = gpio_to_irq(drdy_gpio_pin);
+            irq_trigger |= IRQ_TYPE_EDGE_FALLING;
+
+            if (irq_trigger)
+                irq_set_irq_type(irq, irq_trigger);
+
+            ads1256_dma_exampel();
+           // ret = rtdm_irq_request(&irqh, irq, ads1256_drdy_is_low,
+           //                        0 , "DRDY", NULL);
+
+           // cpumask_t mask;
+           // cpumask_set_cpu(3, &mask);
+
+          //  xnintr_affinity(&irqh, mask);
+
+           // rtdm_irq_enable(&irqh);
+
+            printk(KERN_INFO "Found ADS1256 device on %s", active_cs->dev.name);
+            *return_value = 0;
+
+            return;
+       }
+        ads1256_spi_do_chip_deselect();
+    }
+
+
+
+
+    printk(KERN_ERR "Device ADS1256 not connected.\r\n");
+    * return_value = -ENOENT;
+    return;
+}
+
+int ads1256_rtdm_task_init(rtdm_task_t *task, const char *name,
+                           rtdm_task_proc_t task_proc, void *arg,
+                           int priority, nanosecs_rel_t period)
 {
     union xnsched_policy_param param;
     struct xnthread_start_attr sattr;
@@ -411,7 +633,10 @@ static int ads1256_rtdm_task_init(rtdm_task_t *task, const char *name,
     iattr.name = name;
     iattr.flags = 0;
     iattr.personality = &xenomai_personality;
-    iattr.affinity = CPU_MASK_CPU0;
+    cpumask_t mask;
+    cpumask_set_cpu(3, &mask);
+
+    iattr.affinity = mask;
     param.rt.prio = priority;
 
     err = xnthread_init(task, &iattr, &xnsched_class_rt, &param);
@@ -445,54 +670,140 @@ static int ads1256_rtdm_task_init(rtdm_task_t *task, const char *name,
     return err;
 }
 
-*/
+
+
+
+
+
+static void task_fn(void * arg){
+    ktime_t start;
+
+    int i = 0;
+    uint8_t data[3];
+    atomic_set(&drdy_is_low_status, 1);
+    start = ktime_get( );
+    while(!rtdm_task_should_stop()) {
+        if((ktime_get().tv64- start.tv64) > 1000000000){
+            start = ktime_get();
+            rtdm_printk(KERN_ERR"Sample rate: %d", i);
+            i = 0;
+        }
+        if (atomic_read(&drdy_is_low_status) == 1) {
+            atomic_set(&drdy_is_low_status, 0);
+            ads1256_read_n_bytes(data, 3);
+
+            ring_buffer_npush_back(&(global_buffer), data, 3);
+            i++;
+
+
+        }
+        rtdm_task_sleep(40);
+    }
+}
+
+static void ads1256_rtdm_unregister_devices(void){
+    int device_id ;
+    for (device_id = 0; device_id < ADS1256_ADC_DEVICES_NUMBER; device_id++) {
+        if(ads1256_ads_open_devices[device_id] != NULL){
+            ads1256_ads_open_devices[device_id]->device_used = 0;
+            ring_buffer_destroy(&(ads1256_ads_open_devices[device_id]->buffer));
+            ads1256_ads_open_devices[device_id] = NULL;
+        }
+        printk(KERN_INFO "%s: Unregistering device acd0.%d  ...\r\n", __FUNCTION__, device_id);
+        rtdm_dev_unregister(&ads1256_adc_devices[device_id]);
+        printk(KERN_INFO "%s: Device acd0.%d unregistered  ...\r\n", __FUNCTION__, device_id);
+    }
+}
+
+static int ads1256_prepare_gpio(void){
+    gpio_request_one(drdy_gpio_pin, GPIOF_IN, "DRDY");
+    gpio_request_one(reset_gpio_pin,GPIOF_OUT_INIT_HIGH, "RESET");
+}
+
+static int ads1256_reset(void){
+    gpio_set_value(reset_gpio_pin,0);
+    udelay(50);
+    gpio_set_value(reset_gpio_pin, 1);
+}
+
 
 
 static int __init ads1256_rtdm_init(void)
 {
-    int res;
+    int res = -1;
+    buffer_cmd.size = 0;
+    ring_buffer_init(&(global_buffer), ADS1256_BUFFER_SIZE);
+
     printk(KERN_INFO "Real-Time A/C driver for the ADS1256 init!\n");
     ads1256_rtdm_init_ac_devices();
-
-    res = ads1256_rtdm_search_device_on_spi();
+    ads1256_prepare_gpio();
+    rtdm_task_init(&ads1256_search_ac_task, "search_device_on_spi", ads1256_rtdm_search_device_on_spi, &res, 99, 20000);
+    rtdm_task_join(&ads1256_search_ac_task);
+    printk(KERN_ERR "Result search %d" , res);
     if(res == 0) {
-
-        ads1256_rtdm_print_register_status();
-        ads1256_rtdm_print_register_data_rate();
-
+       // rtdm_lock_init(&global_lock);
+        ads1256_rtdm_task_init(&ads1256_task_agent, "rtdm_agent", task_fn, NULL, 99, 0);
 
 
-
+        device_init = true;
         return 0;
     }else{
-        return -ENOENT;
+        ads1256_rtdm_unregister_devices();
+        return 0; /**To do fix value**/
     }
 
 
 }
 
+static void ads1256_free_gpios(void){
+    gpio_free(drdy_gpio_pin);
+    gpio_free(reset_gpio_pin);
+}
+
 static void __exit  ads1256_rtdm_exit(void)
 {
-    int device_id,res ;
-    if(context != NULL) {
-        res = rtdm_close(device_handle);
+
+    rtdm_master->ops->mmap_release(active_cs);
+    ads1256_reset();
+    ads1256_free_gpios();
+    rtdm_irq_free(&irqh);
+    ads1256_spi_do_chip_deselect();
+    u32 result;
 
 
+    const char* dump_filename = "/log.bin"; //Set to the file you are targeting
+    struct file *file;
+    int i;
+    void* data;  //Needs to be a kernel pointer, not userspace pointer
+    int block_count; //Set me to something
+    int block_size; //Set me to something
+    loff_t pos = 0;
+    mm_segment_t old_fs;
+
+    old_fs = get_fs();  //Save the current FS segment
+    set_fs(get_ds());
+
+    file = filp_open(dump_filename, O_WRONLY|O_CREAT, 0644);
+
+    if(file){
+
+
+        data= global_buffer.buf; //Wherever your data is
+
+        vfs_write(file, data, global_buffer.cur_size, &pos);
+        pos = pos+block_size;
+
+
+        filp_close(file,NULL);
+    }
+    set_fs(old_fs);
+    ring_buffer_destroy(&global_buffer);
+
+    if(device_init == true){
+        rtdm_task_destroy(&ads1256_task_agent);
+        ads1256_rtdm_unregister_devices();
     }
 
-    //if(ads1256_task_agent != NULL)
-        //rtdm_task_destroy(&ads1256_task_agent);
-
-    for (device_id = 0; device_id < ADS1256_ADC_DEVICES_NUMBER; device_id++) {
-        //if(bcm283x_spi_rtdm_open_devices[device_id] != NULL){
-        //    bcm283x_spi_rtdm_open_devices[device_id]->device_used = 0;
-        //}
-        printk(KERN_INFO "%s: Unregistering device acd0.%d  ...\r\n", __FUNCTION__, device_id);
-        rtdm_dev_unregister(&ads1256_adc_devices[device_id]);
-        printk(KERN_INFO "%s: Device acd0.%d unregistered  ...\r\n", __FUNCTION__, device_id);
-    }
-
-    //vfree(context);
     printk(KERN_INFO "Cleaning up module.\n");
 }
 
