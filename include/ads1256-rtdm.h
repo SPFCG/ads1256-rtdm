@@ -33,8 +33,6 @@
 #include <rtdm/uapi/spi.h>
 #include <rtdm/fd.h>
 #include <linux/mm.h>
-#include "spi-device.h"
-#include "spi-master.h"
 #include <linux/device.h>
 #include <linux/gpio.h>
 #include <linux/stat.h>
@@ -46,6 +44,8 @@
 #include <cobalt/kernel/sched.h>
 #include <linux/sched.h>
 #include <linux/cpumask.h>
+#include "spi-device.h"
+#include "spi-master.h"
 
 #ifdef __CDT_PARSER__
 
@@ -58,6 +58,7 @@
 #define MODULE_LICENSE(x)
 #define module_init(x)
 #define module_exit(x)
+
 #include <asm-generic/atomic.h>
 
 #endif /* __CDT_PARSER__ */
@@ -71,6 +72,8 @@
 
 #define ADS1256_EMPTY_CHANNEL 0xFF
 
+#define ADS1256_DEFAULT_SAMPLE_RATE ADS1256_DATA_RATE_30K_SPS
+#define ADS1256_DEFAULT_PGA ADS1256_PGA1
 
 typedef enum ads1256_commands {
     ADS1256_COMMAND_WAKEUP  = 0x00, // Completes SYNC and Exits Standby Mode
@@ -105,17 +108,29 @@ typedef enum ads1256_registers {
 } ads1256_registers_e;
 
 typedef enum ads1256_analog_inputs{
-    AIN0   = 0x00,
-    AIN1   = 0x01,
-    AIN2   = 0x02,
-    AIN3   = 0x03,
-    AIN4   = 0x04,
-    AIN5   = 0x05,
-    AIN6   = 0x06,
-    AIN7   = 0x07,
-    AINCOM = 0x08,
+    ADS1256_AIN0   = 0x00,
+    ADS1256_AIN1   = 0x01,
+    ADS1256_AIN2   = 0x02,
+    ADS1256_AIN3   = 0x03,
+    ADS1256_AIN4   = 0x04,
+    ADS1256_AIN5   = 0x05,
+    ADS1256_AIN6   = 0x06,
+    ADS1256_AIN7   = 0x07,
+    ADS1256_AINCOM = 0x08,
 
 }ads1256_analog_inputs_e;
+
+typedef enum ads1256_pga{
+    ADS1256_PGA1   = 0x00,
+    ADS1256_PGA2   = 0x01,
+    ADS1256_PGA4   = 0x02,
+    ADS1256_PGA8   = 0x03,
+    ADS1256_PGA16   = 0x04,
+    ADS1256_PGA32  = 0x05,
+    ADS1256_PGA64   = 0x06,
+
+
+}ads1256_pga_e;
 
 typedef enum ads1256_data_rate{
     ADS1256_DATA_RATE_30K_SPS     = 0xF0,
@@ -136,6 +151,14 @@ typedef enum ads1256_data_rate{
     ADS1256_DATA_RATE_0K002_5_SPS = 0x03,
 
 }ads1256_data_rate_e;
+
+typedef enum ads1256_ioctl {
+    ADS1256_SET_SAMPLERATE,
+    ADS1256_SET_PGA,
+    ADS1256_SET_CHANNEL_CYCLING_SIZE,
+    ADS1256_SET_BLOCKING_READ
+
+}ads1256_ioctl_e;
 
 struct ads1256_register_status_s{
     u8 order:1;
@@ -210,5 +233,6 @@ static struct buffer_s {
 
 typedef struct ads1256_dev_context_s ads1256_dev_context_t;
 typedef struct buffer_s buffer_t;
+
 
 #endif //ADS1256_RTDM_ADS1256_RTDM_H

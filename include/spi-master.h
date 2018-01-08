@@ -47,7 +47,6 @@ struct rtdm_spi_master_ops {
 		(struct rtdm_spi_master *master,
 			struct spi_device *spi);
 	void (*detach_slave)(struct rtdm_spi_remote_slave *slave);
-	void (*dma_done_handler)(struct rtdm_spi_remote_slave *slave, void (*func)(unsigned long));
 };
 
 struct rtdm_spi_master {
