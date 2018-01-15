@@ -44,6 +44,8 @@
 #include <cobalt/kernel/sched.h>
 #include <linux/sched.h>
 #include <linux/cpumask.h>
+#include <linux/sysfs.h>
+#include <linux/kobject.h>
 #include "spi-device.h"
 #include "spi-master.h"
 
