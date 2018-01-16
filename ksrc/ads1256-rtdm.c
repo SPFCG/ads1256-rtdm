@@ -42,6 +42,7 @@ static rtdm_task_t ads1256_search_ac_task;
 static struct rtdm_device ads1256_adc_devices[ADS1256_ADC_DEVICES_NUMBER];
 static ads1256_dev_context_t *ads1256_ads_open_devices[ADS1256_ADC_DEVICES_NUMBER];
 static rtdm_lock_t global_lock;
+static rtdm_lock_t close_lock;
 
 static struct rtdm_spi_remote_slave *active_cs;
 static struct rtdm_spi_master *rtdm_master;
@@ -485,17 +486,19 @@ static int ads1256_rtdm_open(struct rtdm_fd *fd, int oflags) {
 }
 
 static void ads1256_rtdm_close(struct rtdm_fd *fd) {
+    rtdm_lock_get(&close_lock);
+    printk(KERN_INFO "%s: Device acd0.%d start closed.", __FUNCTION__, fd->minor);
     ads1256_dev_context_t *context = NULL;
-    rtdm_lock_get(&global_lock);
 
     context = (ads1256_dev_context_t *) rtdm_fd_to_private(fd);
+    ring_buffer_destroy(&context->buffer);
     context->analog_input = fd->minor;
     context->device_used = 0;
     ads1256_ads_open_devices[fd->minor] = NULL;
     active_channel = ADS1256_EMPTY_CHANNEL;
-    rtdm_lock_put(&global_lock);
     ads1256_rtdm_reset();
     printk(KERN_INFO "%s: Device acd0.%d closed.", __FUNCTION__, fd->minor);
+    rtdm_lock_put(&close_lock);
     return;
 
 }
@@ -519,8 +522,8 @@ static ssize_t ads1256_rtdm_read_rt(struct rtdm_fd *fd, void __user *buf, size_t
         }
 
     }
-        if(curr_size > size)
-            curr_size = size;
+    if(curr_size > size)
+        curr_size = size;
 
     printk(KERN_INFO "%s: Device acd0.%d read %d bytes.", __FUNCTION__, fd->minor, curr_size);
     buffer = rtdm_malloc(curr_size);
@@ -847,19 +850,20 @@ int ads1256_rtdm_task_init(rtdm_task_t *task, const char *name,
 
 
 static void ads1256_rtdm_get_data_from_device(void *arg) {
-   // ktime_t start;
+    // ktime_t start;
 
     int i = 0;
     uint8_t data[3];
     atomic_set(&drdy_is_low_status, 1);
     //start = ktime_get();
     while (!rtdm_task_should_stop()) {
-       /* if ((ktime_get().tv64 - start.tv64) > 1000000000) {
-            start = ktime_get();
-            rtdm_printk(KERN_ERR
-                                "Sample rate: %d", i);
-            i = 0;
-        }*/
+        rtdm_lock_get(&close_lock);
+        /* if ((ktime_get().tv64 - start.tv64) > 1000000000) {
+             start = ktime_get();
+             rtdm_printk(KERN_ERR
+                                 "Sample rate: %d", i);
+             i = 0;
+         }*/
         if(active_channel != ADS1256_EMPTY_CHANNEL) {
             if (is_cycling_mode == false) {
                 if (atomic_read(&drdy_is_low_status) == 1) {
@@ -874,6 +878,7 @@ static void ads1256_rtdm_get_data_from_device(void *arg) {
         }else{
             rtdm_task_sleep(1e8);
         }
+        rtdm_lock_put(&close_lock);
     }
 }
 

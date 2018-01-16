@@ -31,7 +31,8 @@ void ring_buffer_destroy(struct ring_buffer *ring)
     ring->size = 0;
     ring->head = 0;
     ring->tail = 0;
-    rtdm_free(ring->buf);
+    if(ring->buf != NULL)
+        rtdm_free(ring->buf);
 }
 
 void ring_buffer_push_back(struct ring_buffer *ring, uint8_t d)
